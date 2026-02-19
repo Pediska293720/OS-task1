@@ -1,12 +1,17 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -fPIC
 
-caesar:
-	$(CC) main.c -o caesar
+all: caesar.o libcaesar.so caesar
 
-lib:
-	$(CC) $(CFLAGS) -c caesar.c -o caesar.o
-	$(CC) $(CFLAGS) -shared caesar.c -o libcaesar.so
+caesar.o: caesar.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+libcaesar.so: caesar.o
+	$(CC) -shared $^ -o $@
+
+caesar: main.c
+	$(CC) main.c -o $@ -ldl
+
 
 test:
 	echo "Hello, World! This is a test file." > test_input.txt
@@ -18,5 +23,5 @@ test:
 	@echo ""
 
 install: 
-	sudo cp libcesar.so /usr/local/lib/
+	sudo cp libcaesar.so /usr/local/lib/
 

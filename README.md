@@ -1,8 +1,12 @@
 ## Compilation 
 
 ``` bash
-make caesar
-make lib 
+make  
+```
+
+## Install
+``` bash
+make install
 ```
 
 ## Test

@@ -13,10 +13,10 @@ int main(int argc, char *argv[]) {
     void* library = dlopen(lib, RTLD_LAZY);
 
     void (*caesar)(void*, void*, int) = dlsym(library, "caesar");
-    void (*caesar_key)(char) = dlsym(library, "caesar_key");
+    void (*set_key)(char) = dlsym(library, "set_key");
 
     char key = argv[2][0];
-    caesar_key(key);
+    set_key(key);
     
     FILE* src_file = fopen(argv[3], "rb");
     

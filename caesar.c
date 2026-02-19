@@ -11,7 +11,7 @@ void caesar(void* src, void* dst, int len){
     }
 }
 
-void caesar_key(char key){
+void set_key(char key){
     c_key = (unsigned char)key;
 }
 

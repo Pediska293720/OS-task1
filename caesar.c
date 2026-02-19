@@ -1,8 +1,8 @@
-#include "cesare.h"
+#include "caesar.h"
 
 static unsigned char c_key;
 
-void cesare(void* src, void* dst, int len){
+void caesar(void* src, void* dst, int len){
     unsigned char* src_bytes = (unsigned char*)src;
     unsigned char* dst_bytes = (unsigned char*)dst;
 
@@ -11,7 +11,7 @@ void cesare(void* src, void* dst, int len){
     }
 }
 
-void cesare_key(char key){
+void caesar_key(char key){
     c_key = (unsigned char)key;
 }
 

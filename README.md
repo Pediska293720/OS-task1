@@ -1,17 +1,18 @@
 ## Compilation 
 
 ``` bash
-make cesare
+make caesar
 make lib 
+make test
 
 ```
 
 ## Usage
 ``` bash
-./cesare <library.so> <key> <scr_file><dst_file>
+./caesar <library.so> <key> <scr_file><dst_file>
 ```
 ### Example
 ``` bash
-./cesare ./cesarelib Y data/input.txt output.txt
+./caesar ./libcaesare Y data/input.txt output.txt
 ```
 `hello world` -> `1<556y.6+5=`

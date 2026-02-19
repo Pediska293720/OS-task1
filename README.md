@@ -16,6 +16,6 @@ make test
 ```
 ### Example
 ``` bash
-./caesar ./libcaesare.so Y data/input.txt output.txt
+./caesar ./libcaesar.so Y data/input.txt output.txt
 ```
 `hello world` -> `1<556y.6+5=`

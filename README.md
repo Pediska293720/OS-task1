@@ -3,8 +3,11 @@
 ``` bash
 make caesar
 make lib 
-make test
+```
 
+## Test
+``` bash
+make test
 ```
 
 ## Usage
@@ -13,6 +16,6 @@ make test
 ```
 ### Example
 ``` bash
-./caesar ./libcaesare Y data/input.txt output.txt
+./caesar ./libcaesare.so Y data/input.txt output.txt
 ```
 `hello world` -> `1<556y.6+5=`

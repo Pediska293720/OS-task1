@@ -1,7 +1,9 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -fPIC
+GLIB_FLAGS = $(shell pkg-config --cflags glib-2.0)
+GLIB_LIBS = $(shell pkg-config --libs glib-2.0)
 
-all: caesar.o libcaesar.so caesar
+all: libcaesar.so caesar secure_copy
 
 caesar.o: caesar.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -12,6 +14,8 @@ libcaesar.so: caesar.o
 caesar: main.c
 	$(CC) main.c -o $@ -ldl
 
+secure_copy: secure_copy.c
+	$(CC) $(CFLAGS:-fPIC=) $(GLIB_FLAGS) -o $@ $< -pthread $(GLIB_LIBS) -ldl
 
 test:
 	echo "Hello, World! This is a test file." > test_input.txt
@@ -24,4 +28,5 @@ test:
 
 install: 
 	sudo cp libcaesar.so /usr/local/lib/
+	sudo ldconfig
 

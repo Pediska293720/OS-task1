@@ -1,7 +1,5 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -fPIC
-GLIB_FLAGS = $(shell pkg-config --cflags glib-2.0)
-GLIB_LIBS = $(shell pkg-config --libs glib-2.0)
 
 all: libcaesar.so caesar secure_copy
 
@@ -15,7 +13,7 @@ caesar: main.c
 	$(CC) main.c -o $@ -ldl
 
 secure_copy: secure_copy.c
-	$(CC) $(CFLAGS:-fPIC=) $(GLIB_FLAGS) -o $@ $< -pthread $(GLIB_LIBS) -ldl
+	$(CC) $(CFLAGS:-fPIC=) -o $@ $< -pthread -ldl
 
 test:
 	echo "Hello, World! This is a test file." > test_input.txt

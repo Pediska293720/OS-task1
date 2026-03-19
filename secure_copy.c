@@ -5,33 +5,53 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <glib.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #define BUFFER_SIZE 4096
+#define TIMEOUT_SECONDS 5
+#define COUNT_THREADS 3
 
 static volatile int keep_running = 1;
 
 void (*caesar)(void*, void*, int) = NULL;
 void (*set_key)(char) = NULL;
 
-typedef struct {
-    unsigned char *data;
-    int size;
-} data_block_t;
-
 
 typedef struct {
-    GAsyncQueue *queue;
-    int input_fd;
-    int output_fd;
-    int key;
-    volatile int *running;
-    int producer_done;
-    pthread_mutex_t done_mutex;
-    pthread_cond_t cond;
+    char **input_files;            
+    int total_files;               
+    int *current_file_index;       
+    char *output_dir;              
+    int key;                       
+    volatile int *running;         
+    pthread_mutex_t *file_mutex;   
+    FILE *log_file;                
+    pthread_mutex_t *log_mutex;    
+    int thread_id;                  
 } thread_data_t;  
 
+void get_timestamp(char *buffer, size_t size) {
+    time_t rawtime;
+    struct tm *timeinfo;
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", timeinfo);
+}
+
+void log_operation(thread_data_t *data, const char *filename, const char *status) {
+    char timestamp[64];
+    get_timestamp(timestamp, sizeof(timestamp));
+    
+    pthread_mutex_lock(data->log_mutex);
+    fprintf(data->log_file, "[%s] Поток %d: %s - %s\n",
+            timestamp, data->thread_id, filename, status);
+    fflush(data->log_file);
+    pthread_mutex_unlock(data->log_mutex);
+}
 
 int load_caesar_library() {
     void *handle = dlopen("./libcaesar.so", RTLD_LAZY);
@@ -53,194 +73,204 @@ int load_caesar_library() {
     return 0;
 }
 
+char* get_next_file(thread_data_t *data) {
+    struct timespec timeout;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += TIMEOUT_SECONDS;
+    
+    int lock_result = pthread_mutex_timedlock(data->file_mutex, &timeout);
+    
+    if (lock_result == ETIMEDOUT) {
+        printf("Возможная взаимоблокировка: поток %d ожидает мьютекс >5 сек\n", 
+               data->thread_id);
+        return NULL;
+    }
+    
+    if (lock_result != 0) {
+        return NULL;
+    }
+    
+    char *next_file = NULL;
+    if (*data->current_file_index < data->total_files) {
+        next_file = data->input_files[*data->current_file_index];
+        (*data->current_file_index)++;
+    }
+    
+    pthread_mutex_unlock(data->file_mutex);
+    return next_file;
+}
 
-void* producer_thread(void *arg) {
+const char* get_filename(const char *path) {
+    const char *filename = strrchr(path, '/');
+    if (filename) return filename + 1;
+    filename = strrchr(path, '\\');
+    if (filename) return filename + 1;
+    return path;
+}
+
+
+void* file_processor_thread(void *arg) {
     thread_data_t *data = (thread_data_t*)arg;
+    
     unsigned char *read_buffer = malloc(BUFFER_SIZE);
     unsigned char *encrypted_buffer = malloc(BUFFER_SIZE);
     
     if (!read_buffer || !encrypted_buffer) {
-        printf("Ошибка выделения памяти в producer\n");
         free(read_buffer);
         free(encrypted_buffer);
         return NULL;
     }
+    
     set_key((char)data->key);
     
     while (*data->running) {
-        ssize_t bytes_read = read(data->input_fd, read_buffer, BUFFER_SIZE);
-        if (bytes_read <= 0) {
+        char *input_file = get_next_file(data);
+        if (!input_file) {
+            pthread_mutex_lock(data->file_mutex);
+            int all_processed = (*data->current_file_index >= data->total_files);
+            pthread_mutex_unlock(data->file_mutex);
+            
+            if (all_processed) break;
+            usleep(100000); 
+            continue;
+        }
+        
+        const char *base_filename = get_filename(input_file);
+        
+        char output_path[512];
+        snprintf(output_path, sizeof(output_path), "%s/%s", 
+                 data->output_dir, base_filename);
+        
+        int input_fd = open(input_file, O_RDONLY);
+        if (input_fd == -1) {
+            log_operation(data, input_file, "ОШИБКА: не удалось открыть файл");
+            continue;
+        }
+        
+        int output_fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (output_fd == -1) {
+            log_operation(data, input_file, "ОШИБКА: не удалось создать выходной файл");
+            close(input_fd);
+            continue;
+        }
+        
+        int success = 1;
+        
+        while (*data->running) {
+            ssize_t bytes_read = read(input_fd, read_buffer, BUFFER_SIZE);
+            if (bytes_read == 0) break;  
             if (bytes_read < 0) {
-                printf("Ошибка чтения файла\n");
+                success = 0;
+                break;
             }
-            break;
+            
+            caesar(read_buffer, encrypted_buffer, bytes_read);
+            
+            ssize_t bytes_written = write(output_fd, encrypted_buffer, bytes_read);
+            if (bytes_written != bytes_read) {
+                success = 0;
+                break;
+            }
         }
-        caesar(read_buffer, encrypted_buffer, bytes_read);
-
-        data_block_t *block = malloc(sizeof(data_block_t));
-        block->data = malloc(bytes_read);
-
-        if (!block->data) {
-            printf("Ошибка выделения памяти для данных блока\n");
-            free(block);
-            break;
-        }
-        memcpy(block->data, encrypted_buffer, bytes_read);
-        block->size = bytes_read;
-        g_async_queue_push(data->queue, block);
+        
+        close(input_fd);
+        close(output_fd);
+        
+        if (success && *data->running) {
+            log_operation(data, input_file, "УСПЕХ");
+        } else if (!*data->running) {
+            log_operation(data, input_file, "ПРЕРВАНО");
+        } 
     }
     
-    pthread_mutex_lock(&data->done_mutex);
-    data->producer_done = 1;
-    pthread_cond_signal(&data->cond);  
-    pthread_mutex_unlock(&data->done_mutex);
     free(read_buffer);
     free(encrypted_buffer);
-    
-    return NULL;
-}
-
-
-void* consumer_thread(void *arg) {
-    thread_data_t *data = (thread_data_t*)arg;
-    
-    while (1) {
-        data_block_t *block = g_async_queue_try_pop(data->queue);
-        if (block){
-            ssize_t bytes_written = write(data->output_fd, block->data, block->size);
-            if (bytes_written != block->size) {
-                if (bytes_written < 0) {
-                    printf("Ошибка записи в файл\n");
-                }
-            }
-            free(block->data);
-            free(block);
-        }
-        else {
-            pthread_mutex_lock(&data->done_mutex);
-            if (data->producer_done && g_async_queue_length(data->queue) == 0) {
-                pthread_mutex_unlock(&data->done_mutex);
-                break;
-            }
-
-            if (*data->running && !data->producer_done) {
-                struct timespec ts;
-                clock_gettime(CLOCK_REALTIME, &ts);
-                ts.tv_sec += 1;
-                pthread_cond_timedwait(&data->cond, &data->done_mutex, &ts);
-            }
-            
-            pthread_mutex_unlock(&data->done_mutex);
-            if (!*data->running) {
-                break;
-            
-            }
-        }
-    }
-
-    while (1) {
-        data_block_t *block = g_async_queue_try_pop(data->queue);
-        if (!block) break;
-        free(block->data);
-        free(block);
-    }
     return NULL;
 }
 
 
 void signal_handler(int sig) {
     if (sig == SIGINT) {
+        printf("\nПолучен сигнал SIGINT. Завершение работы...\n");
         keep_running = 0;
     }
 }
 
 
 int main(int argc, char *argv[]) {
-    int ret = 0;
-    if (argc != 4) {
-        printf("Использование: %s <input_file> <output_file> <key>\n", argv[0]);
-        return 1;
-    }
-
-    if (strcmp(argv[1], argv[2]) == 0) {
-        printf("Ошибка: входной и выходной файлы не могут совпадать.\n");
+    if (argc < 4) {
+        printf("Использование: %s <file_1> ... <file_n> <output_dir> <key>\n", argv[0]);
         return 1;
     }
 
     if (load_caesar_library() != 0) {
         return 1;
     }
-    
+
+    int num_files = argc - 3;
+    char *output_dir = argv[argc - 2];
+
+    struct stat st = {0};
+    if (stat(output_dir, &st) == -1) {
+        mkdir(output_dir, 0700);
+    }
+
     struct sigaction sa;
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    
-    if (sigaction(SIGINT, &sa, NULL) == -1) {
-        printf("Ошибка установки обработчика сигнала");
+    sigaction(SIGINT, &sa, NULL);
+
+
+    pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+    int current_file_index = 0;  
+
+    FILE *log_file = fopen("log.txt", "a");
+    if (!log_file) {
+        printf("Ошибка создания log.txt\n");
         return 1;
     }
 
-    int input_fd = open(argv[1], O_RDONLY);
-    if (input_fd == -1) {
-        printf("Ошибка открытия входного файла '%s'\n", argv[1]);
-        return 1;
-    }
 
-    int output_fd = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (output_fd == -1) {
-        printf("Ошибка открытия выходного файла '%s'\n", argv[2]);
-        close(input_fd);
-        return 1;
-    }
+    char key = atoi(argv[argc - 1]);
 
-    char key = argv[3][0];
-    thread_data_t thread_data;  // Исправлено имя типа
-    thread_data.input_fd = input_fd;
-    thread_data.output_fd = output_fd;
-    thread_data.key = key;
-    thread_data.running = &keep_running;
-    thread_data.producer_done = 0;
+   char timestamp[64];
+    get_timestamp(timestamp, sizeof(timestamp));
+    fflush(log_file);
 
-    thread_data.queue = g_async_queue_new();
-    pthread_mutex_init(&thread_data.done_mutex, NULL);
-    pthread_cond_init(&thread_data.cond, NULL);
+    pthread_t threads[COUNT_THREADS];
+    thread_data_t thread_data[COUNT_THREADS];
 
-    pthread_t producer, consumer;
-    if (pthread_create(&producer, NULL, producer_thread, &thread_data) != 0) {
-        ret = 1;
-        goto cleanup;
-    }
-    if (pthread_create(&consumer, NULL, consumer_thread, &thread_data) != 0) {
-        ret = 1;
-        pthread_cancel(producer);
-        pthread_join(producer, NULL);
-        goto cleanup;
-    }
-
-    pthread_join(producer, NULL);
-    pthread_join(consumer, NULL);
-
-cleanup:
-    close(input_fd);
-    close(output_fd);
-    
-    if (thread_data.queue) {
-        while (1) {
-            data_block_t *block = g_async_queue_try_pop(thread_data.queue);
-            if (!block) break;
-            free(block->data);
-            free(block);
+    for (int i = 0; i < COUNT_THREADS; i++) {
+        thread_data[i].input_files = argv + 1;  
+        thread_data[i].total_files = num_files;
+        thread_data[i].current_file_index = &current_file_index;  
+        thread_data[i].output_dir = output_dir;
+        thread_data[i].key = key;
+        thread_data[i].running = &keep_running;
+        thread_data[i].file_mutex = &file_mutex;  
+        thread_data[i].log_file = log_file;
+        thread_data[i].log_mutex = &log_mutex;    
+        thread_data[i].thread_id = i + 1;
+        
+        if (pthread_create(&threads[i], NULL, file_processor_thread, &thread_data[i]) != 0) {
+            printf("Ошибка создания потока %d\n", i + 1);
+            keep_running = 0;
+            break;
         }
-        g_async_queue_unref(thread_data.queue);
     }
-    pthread_mutex_destroy(&thread_data.done_mutex);
-    pthread_cond_destroy(&thread_data.cond);
 
-    if (keep_running == 0) {
-        printf("Операция прервана пользователем\n");
-    } else {
-        printf("Операция успешно завершена\n");
+    for (int i = 0; i < COUNT_THREADS; i++) {
+        pthread_join(threads[i], NULL);
     }
-    return ret;
+
+     get_timestamp(timestamp, sizeof(timestamp));
+    fprintf(log_file, "=== Завершение %s ===\n\n", timestamp);
+    fclose(log_file);
+
+    pthread_mutex_destroy(&file_mutex);
+    pthread_mutex_destroy(&log_mutex);
+
+    return 0;
 }

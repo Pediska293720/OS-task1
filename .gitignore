@@ -1,0 +1,5 @@
+*.o
+*.so
+caesar
+secure_copy
+data/

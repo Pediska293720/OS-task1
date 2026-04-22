@@ -9,11 +9,6 @@ make
 make install
 ```
 
-## Test libcaesar
-``` bash
-make test
-```
-
 ## Usage
 ``` bash
 ./caesar <library.so> <key> <scr_file> <dst_file>

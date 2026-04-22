@@ -15,16 +15,12 @@ caesar: main.c
 secure_copy: secure_copy.c
 	$(CC) $(CFLAGS:-fPIC=) -o $@ $< -pthread -ldl
 
-test:
-	echo "Hello, World! This is a test file." > test_input.txt
-	./caesar ./libcaesar.so A test_input.txt test_encrypted.txt
-	@cat test_encrypted.txt
-	@echo ""
-	./caesar ./libcaesar.so A test_encrypted.txt test_decrypted.txt
-	@cat test_decrypted.txt
-	@echo ""
+clean: 
+	rm -f *.o *.so secure_copy
 
 install: 
 	sudo cp libcaesar.so /usr/local/lib/
 	sudo ldconfig
+
+
 

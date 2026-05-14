@@ -2,6 +2,8 @@
 #define CAESAR_H
 
 void caesar(void* src, void* dst, int len);
-void set_key(char key);
+int set_key(char key);
+int init_secure_key_storage(void);
+void cleanup_secure_key(void);
 
 #endif

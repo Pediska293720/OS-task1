@@ -20,3 +20,9 @@ make install
 ./secure_copy data/file1.txt data/file2.txt outdir Y
 ```
 `hello world` -> `1<556y.6+5=`
+
+
+### tests
+./secure_copy --mode=auto test_files/* output_dir/auto_par 3
+./secure_copy --mode=auto test_files/file_1.txt test_files/file_2.txt test_files/file_3.txt test_files/file_4.txt  output_dir/auto_seq 3
+./secure_copy --mode=auto test_files/* output_dir/auto_par 3

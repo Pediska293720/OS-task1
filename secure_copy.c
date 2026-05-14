@@ -18,7 +18,12 @@
 static volatile int keep_running = 1;
 
 void (*caesar)(void*, void*, int) = NULL;
-void (*set_key)(char) = NULL;
+int (*set_key)(char) = NULL;
+int (*init_secure_key_storage)(void) = NULL;
+void (*cleanup_secure_key)(void) = NULL;
+
+int (*test_key_protection)(void) = NULL;        // ДОБАВИТЬ
+void (*print_protection_status)(void) = NULL;
 
 typedef struct {
     struct timespec start_time;
@@ -32,8 +37,7 @@ typedef struct {
     char **input_files;            
     int total_files;               
     int *current_file_index;       
-    char *output_dir;              
-    int key;                       
+    char *output_dir;                               
     volatile int *running;         
     pthread_mutex_t *file_mutex;   
     FILE *log_file;                
@@ -75,14 +79,13 @@ int load_caesar_library() {
     
     *(void**)(&caesar) = dlsym(handle, "caesar");
     *(void**)(&set_key) = dlsym(handle, "set_key");
-    
-    char *error = dlerror();
-    if (error) {
-        printf("Ошибка поиска символов\n");
-        dlclose(handle);
-        return -1;
-    }
-    
+    *(void**)(&init_secure_key_storage) = dlsym(handle, "init_secure_key_storage");
+    *(void**)(&cleanup_secure_key) = dlsym(handle, "cleanup_secure_key"); 
+
+
+    *(void**)(&test_key_protection) = dlsym(handle, "test_key_protection");        // ДОБАВИТЬ
+    *(void**)(&print_protection_status) = dlsym(handle, "print_protection_status"); // ДОБАВИТЬ
+
     return 0;
 }
 
@@ -122,7 +125,7 @@ const char* get_filename(const char *path) {
 }
 
 int process_single_file(const char *input_file, const char *output_dir, 
-                        int key, FILE *log_file, pthread_mutex_t *log_mutex, 
+                        FILE *log_file, pthread_mutex_t *log_mutex, 
                         int thread_id, struct timespec *file_start, 
                         struct timespec *file_end){
     clock_gettime(CLOCK_MONOTONIC, file_start);
@@ -155,7 +158,6 @@ int process_single_file(const char *input_file, const char *output_dir,
         return -1;
     }
 
-    set_key((char)key);
     int success = 1;
 
     while (1) {
@@ -206,7 +208,7 @@ void* file_processor_thread(void *arg) {
         }
         
         struct timespec file_start, file_end;
-        int result = process_single_file(input_file, data->output_dir, data->key, 
+        int result = process_single_file(input_file, data->output_dir,
                                         data->log_file, data->log_mutex,
                                         data->thread_id, &file_start, &file_end);
         
@@ -222,7 +224,7 @@ void* file_processor_thread(void *arg) {
 }
 
 void run_sequential_mode(char **input_files, int num_files, char *output_dir, 
-                         int key, FILE *log_file, performance_stats_t *stats) {
+                         FILE *log_file, performance_stats_t *stats) {
     clock_gettime(CLOCK_MONOTONIC, &stats->start_time);
     
     double total_file_time = 0.0;
@@ -230,7 +232,7 @@ void run_sequential_mode(char **input_files, int num_files, char *output_dir,
     
     for (int i = 0; i < num_files && keep_running; i++) {
         struct timespec file_start, file_end;
-        int result = process_single_file(input_files[i], output_dir, key,
+        int result = process_single_file(input_files[i], output_dir,
                                          log_file, NULL, 0, &file_start, &file_end);
         
         if (result == 0) {
@@ -256,7 +258,7 @@ void run_sequential_mode(char **input_files, int num_files, char *output_dir,
 }
 
 void run_parallel_mode(char **input_files, int num_files, char *output_dir, 
-                       int key, FILE *log_file, performance_stats_t *stats) {
+                       FILE *log_file, performance_stats_t *stats) {
     pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
     int current_file_index = 0;
@@ -275,7 +277,6 @@ void run_parallel_mode(char **input_files, int num_files, char *output_dir,
         thread_data[i].total_files = num_files;
         thread_data[i].current_file_index = &current_file_index;
         thread_data[i].output_dir = output_dir;
-        thread_data[i].key = key;
         thread_data[i].running = &keep_running;
         thread_data[i].file_mutex = &file_mutex;
         thread_data[i].log_file = log_file;
@@ -305,7 +306,7 @@ void run_parallel_mode(char **input_files, int num_files, char *output_dir,
     }
     
     if (stats->files_processed > 0) {
-        stats->avg_time_per_file_sec = total_processing_time / stats->files_processed;
+        stats->avg_time_per_file_sec = stats->total_time_sec / stats->files_processed;
     } else {
         stats->avg_time_per_file_sec = 0;
     }
@@ -331,8 +332,6 @@ void print_comparison(performance_stats_t *seq_stats, performance_stats_t *par_s
     printf("- Общее время (сек)      %20.3f \n", par_stats->total_time_sec);
     printf("- Среднее время (сек)    %20.3f \n", par_stats->avg_time_per_file_sec);
     printf("- Обработано файлов      %20d \n", par_stats->files_processed);
-
-
 
     if (par_stats->total_time_sec > 0) {
         double speedup = seq_stats->total_time_sec / par_stats->total_time_sec;
@@ -364,7 +363,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-
     char *mode_str = NULL;
     if (strncmp(argv[1], "--mode=", 7) == 0) {
         mode_str = argv[1] + 7;
@@ -377,7 +375,19 @@ int main(int argc, char *argv[]) {
     int num_files = argc - 4;
     char *output_dir = argv[argc - 2];
     char **input_files = argv + 2;
+    
     char key = atoi(argv[argc - 1]);
+
+    if (init_secure_key_storage() != 0) {
+        printf("Ошибка инициализации защищенного хранилища ключа\n");
+        return 1;
+    }
+
+    if (set_key(key) != 0) {
+        printf("Ошибка установки ключа\n");
+        cleanup_secure_key();
+        return 1;
+    }
 
     struct stat st = {0};
     if (stat(output_dir, &st) == -1) {
@@ -405,23 +415,23 @@ int main(int argc, char *argv[]) {
     memset(&par_stats, 0, sizeof(par_stats));
 
     if (strcmp(mode_str, "sequential") == 0) {
-        run_sequential_mode(input_files, num_files, output_dir, key, log_file, &seq_stats);
+        run_sequential_mode(input_files, num_files, output_dir, log_file, &seq_stats);
         print_statistics("ПОСЛЕДОВАТЕЛЬНЫЙ", &seq_stats);
     } 
     else if (strcmp(mode_str, "parallel") == 0) {
-        run_parallel_mode(input_files, num_files, output_dir, key, log_file, &par_stats);
+        run_parallel_mode(input_files, num_files, output_dir, log_file, &par_stats);
         print_statistics("ПАРАЛЛЕЛЬНЫЙ", &par_stats);
     }
     else if (strcmp(mode_str, "auto") == 0) {
         if (num_files < 5) {
-            run_sequential_mode(input_files, num_files, output_dir, key, log_file, &seq_stats);
+            run_sequential_mode(input_files, num_files, output_dir, log_file, &seq_stats);
             print_statistics("ПОСЛЕДОВАТЕЛЬНЫЙ", &seq_stats);
-            run_parallel_mode(input_files, num_files, output_dir, key, log_file, &par_stats);
+            run_parallel_mode(input_files, num_files, output_dir, log_file, &par_stats);
         }
         else {
-            run_parallel_mode(input_files, num_files, output_dir, key, log_file, &par_stats);
+            run_parallel_mode(input_files, num_files, output_dir, log_file, &par_stats);
             print_statistics("ПАРАЛЛЕЛЬНЫЙ", &par_stats);
-            run_sequential_mode(input_files, num_files, output_dir, key, log_file, &seq_stats);
+            run_sequential_mode(input_files, num_files, output_dir, log_file, &seq_stats);
         }
         print_comparison(&seq_stats, &par_stats);
     }
@@ -432,6 +442,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    cleanup_secure_key();
     get_timestamp(timestamp, sizeof(timestamp));
     fprintf(log_file, "=== Завершение %s ===\n\n", timestamp);
     fclose(log_file);

@@ -1,16 +1,13 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -fPIC
 
-all: libcaesar.so caesar secure_copy
+all: libcaesar.so secure_copy
 
 caesar.o: caesar.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 libcaesar.so: caesar.o
 	$(CC) -shared $^ -o $@
-
-caesar: main.c
-	$(CC) main.c -o $@ -ldl
 
 secure_copy: secure_copy.c
 	$(CC) $(CFLAGS:-fPIC=) -o $@ $< -pthread -ldl

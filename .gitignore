@@ -2,5 +2,6 @@
 *.so
 caesar
 secure_copy
-data/
+out/*
+test_files/*
 log.txt

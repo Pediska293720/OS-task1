@@ -15,15 +15,14 @@
 #define TIMEOUT_SECONDS 5
 #define WORKERS_COUNT 4
 
+static FILE *log_file = NULL;
 static volatile int keep_running = 1;
+static volatile int interruption_received = 0;
 
 void (*caesar)(void*, void*, int) = NULL;
 int (*set_key)(char) = NULL;
 int (*init_secure_key_storage)(void) = NULL;
 void (*cleanup_secure_key)(void) = NULL;
-
-int (*test_key_protection)(void) = NULL;        // ДОБАВИТЬ
-void (*print_protection_status)(void) = NULL;
 
 typedef struct {
     struct timespec start_time;
@@ -81,10 +80,6 @@ int load_caesar_library() {
     *(void**)(&set_key) = dlsym(handle, "set_key");
     *(void**)(&init_secure_key_storage) = dlsym(handle, "init_secure_key_storage");
     *(void**)(&cleanup_secure_key) = dlsym(handle, "cleanup_secure_key"); 
-
-
-    *(void**)(&test_key_protection) = dlsym(handle, "test_key_protection");        // ДОБАВИТЬ
-    *(void**)(&print_protection_status) = dlsym(handle, "print_protection_status"); // ДОБАВИТЬ
 
     return 0;
 }
@@ -195,7 +190,7 @@ int process_single_file(const char *input_file, const char *output_dir,
 void* file_processor_thread(void *arg) {
     thread_data_t *data = (thread_data_t*)arg;
     
-    while (*data->running) {
+    while (*data->running  && !interruption_received) {
         char *input_file = get_next_file(data);
         if (!input_file) {
             pthread_mutex_lock(data->file_mutex);
@@ -347,13 +342,34 @@ void print_comparison(performance_stats_t *seq_stats, performance_stats_t *par_s
 }
 
 void signal_handler(int sig) {
-    if (sig == SIGINT) {
-        printf("\nПолучен сигнал SIGINT. Завершение работы...\n");
-        keep_running = 0;
+    printf("\nПолучен сигнал SIGINT. Завершение работы...\n");
+
+     if (log_file) {
+        char timestamp[64];
+        get_timestamp(timestamp, sizeof(timestamp));
+        fprintf(log_file, "[%s] SIGINT: Прерывание по клавиатуре\n", timestamp);
+        fflush(log_file);
     }
+    _exit(sig);
 }
 
+void segfault_handler(int sig) {
+    interruption_received = sig;
+    fprintf(stderr, "\nОШИБКА: Попытка чтения защищенной памяти (SIGSEGV)\n");
+    if (log_file) {
+        char timestamp[64];
+        get_timestamp(timestamp, sizeof(timestamp));
+        fprintf(log_file, "[%s] SIGSEGV: Попытка доступа к защищенной памяти\n", timestamp);
+        fflush(log_file);
+    }
+    _exit(sig);
+}
+
+
 int main(int argc, char *argv[]) {
+    signal(SIGSEGV, segfault_handler);
+    signal(SIGINT, signal_handler);
+
     if (argc < 4) {
         printf("Использование: %s --mode=<sequential|parallel|auto> <file_1> ... <file_n> <output_dir> <key>\n", argv[0]);
         return 1;
@@ -400,7 +416,7 @@ int main(int argc, char *argv[]) {
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, NULL);
 
-    FILE *log_file = fopen("log.txt", "a");
+    log_file = fopen("log.txt", "a");
     if (!log_file) {
         printf("Ошибка создания log.txt\n");
         return 1;

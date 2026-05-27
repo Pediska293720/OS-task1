@@ -1,7 +1,13 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -fPIC
+CFLAGS = -Wall -Wextra -pedantic -fPIC -g
 
-all: libcaesar.so secure_copy
+all: librc4.so secure_copy
+
+rc4.o: rc4.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+librc4.so: rc4.o
+	$(CC) -shared $^ -o $@
 
 caesar.o: caesar.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -16,7 +22,7 @@ clean:
 	rm -f *.o *.so secure_copy
 
 install: 
-	sudo cp libcaesar.so /usr/local/lib/
+	sudo cp librc4.so /usr/local/lib/
 	sudo ldconfig
 
 

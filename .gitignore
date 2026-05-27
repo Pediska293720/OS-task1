@@ -5,3 +5,4 @@ secure_copy
 out/*
 test_files/*
 log.txt
+data/*

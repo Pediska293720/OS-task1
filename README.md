@@ -14,6 +14,17 @@ make install
 ./caesar <library.so> <key> <scr_file> <dst_file>
 ./secure_copy <file_1> ... <file_n> <output_dir> <key>
 ```
+
+### Task 6 usage
+```
+./secure_copy -add -image disk.img -key 12345678 file.txt
+
+./secure_copy -add -image disk.img -key 12345678 file1.txt file2.txt file3.txt
+
+./secure_copy -list -image disk.img
+
+./secure_copy -get -image disk.img -key 12345678 -out extracted.txt file.txt
+```
 ### Example
 ``` bash
 ./caesar ./libcaesar.so Y data/input.txt data/output.txt

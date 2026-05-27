@@ -132,25 +132,44 @@ file_entry_t* get_next_file(thread_data_t *data) {
 }
 
 int file_exists_in_container(const char *filename) {
-    int fd = open(container_path, O_RDONLY);
-    if (fd < 0) return 0;
+    int container_fd = open(container_path, O_RDONLY);
+    if (container_fd < 0) return 0;
     
-    file_header_t h;
-    while (read(fd, &h, sizeof(h)) == sizeof(h)) {
-        char *name = malloc(h.name_len + 1);
-        read(fd, name, h.name_len);
-        name[h.name_len] = '\0';
-        
-        if (strcmp(name, filename) == 0) {
-            free(name);
-            close(fd);
-            return 1;
+    file_header_t header;
+    ssize_t bytes_read;
+    int found = 0;
+    size_t target_len = strlen(filename);
+    
+    while ((bytes_read = read(container_fd, &header, sizeof(header))) == sizeof(header)) {
+        if (header.name_len != target_len) {
+            lseek(container_fd, header.name_len + header.data_len, SEEK_CUR);
+            continue;
         }
-        free(name);
-        lseek(fd, h.data_len, SEEK_CUR);
+        int match = 1;
+        for (size_t i = 0; i < target_len; i++) {
+            char c;
+            if (read(container_fd, &c, 1) != 1) {
+                match = 0;
+                break;
+            }
+            if (c != filename[i]) {
+                match = 0;
+                for (size_t j = i + 1; j < target_len; j++) {
+                    read(container_fd, &c, 1);
+                }
+                break;
+            }
+        }
+        
+        if (match) {
+            found = 1;
+            break;
+        }
+        lseek(container_fd, header.data_len, SEEK_CUR);
     }
-    close(fd);
-    return 0;
+    
+    close(container_fd);
+    return found;
 }
 
 int append_file_to_container(const char *filename, const char *relative_name) {
@@ -183,13 +202,6 @@ int append_file_to_container(const char *filename, const char *relative_name) {
     struct stat st;
     if (fstat(input_fd, &st) != 0) {
         printf("Ошибка получения информации о файле: %s\n", filename);
-        close(input_fd);
-        close(container_fd);
-        return -1;
-    }
-    
-    if (st.st_size == 0) {
-        printf("Предупреждение: файл %s пуст, пропускаем\n", relative_name);
         close(input_fd);
         close(container_fd);
         return -1;
@@ -268,8 +280,6 @@ int list_files_in_container(void) {
     typedef struct {
         char *name;
         uint32_t size;
-        uint8_t salt[SALT_SIZE];
-        off_t data_offset;
     } list_entry_t;
     
     list_entry_t *entries = NULL;
@@ -279,7 +289,6 @@ int list_files_in_container(void) {
     ssize_t bytes_read;
     
     while ((bytes_read = read(container_fd, &header, sizeof(header))) == sizeof(header)) {
-        // Проверка валидности
         if (header.name_len > 4096 || header.data_len > 1024*1024*1024) {
             printf("Образ поврежден: некорректный заголовок\n");
             break;
@@ -297,21 +306,20 @@ int list_files_in_container(void) {
         entries = realloc(entries, (entry_count + 1) * sizeof(list_entry_t));
         entries[entry_count].name = strdup(name);
         entries[entry_count].size = header.data_len;
-        memcpy(entries[entry_count].salt, header.salt, SALT_SIZE);
-        entries[entry_count].data_offset = lseek(container_fd, 0, SEEK_CUR);
         entry_count++;
         
         free(name);
         lseek(container_fd, header.data_len, SEEK_CUR);
     }
     
+    close(container_fd);
+
     if (entry_count == 0) {
         printf("\nОбраз пуст\n");
         close(container_fd);
         return 0;
     }
     
-    // Сортировка по имени
     for (int i = 0; i < entry_count - 1; i++) {
         for (int j = i + 1; j < entry_count; j++) {
             if (strcmp(entries[i].name, entries[j].name) > 0) {
@@ -321,50 +329,19 @@ int list_files_in_container(void) {
             }
         }
     }
-    
+
     printf("\nФайлы в образе:\n");
-    printf("%-10s %-30s %s\n", "Размер", "Имя", "Превью (первые 32 байта)");
-    printf("%-10s %-30s %s\n", "------", "----", "------------------------\n");
-    
-    uint8_t *buffer = malloc(64);
-    uint8_t *decrypted = malloc(64);
-    
-    for (int i = 0; i < entry_count && i < 50; i++) {  // Ограничим вывод 50 файлами
-        printf("%-10u %-30s ", entries[i].size, entries[i].name);
-        
-        // Читаем первые 32 байта файла
-        lseek(container_fd, entries[i].data_offset, SEEK_SET);
-        
-        int preview_len = entries[i].size < 32 ? entries[i].size : 32;
-        if (preview_len > 0) {
-            read(container_fd, buffer, preview_len);
-            rc4_crypt_with_salt(buffer, decrypted, preview_len, entries[i].salt, SALT_SIZE);
-            
-            for (int j = 0; j < preview_len && j < 32; j++) {
-                if (decrypted[j] >= 32 && decrypted[j] <= 126) {
-                    printf("%c", decrypted[j]);
-                } else {
-                    printf(".");
-                }
-            }
-        }
-        printf("\n");
-        
+    printf("%-16s %s\n", "Размер", "Имя");
+    printf("%-10s %s\n", "------", "-----------------------------");
+   
+    for (int i = 0; i < entry_count; i++) {
+        printf("%-10u %s\n", entries[i].size, entries[i].name);
         free(entries[i].name);
     }
     
-    free(buffer);
-    free(decrypted);
-    
-    printf("\n----------------------------------------\n");
+    printf("----------------------------------------\n");
     printf("Всего файлов: %d\n", entry_count);
-    
-    if (entry_count > 50) {
-        printf("(показано первых 50 файлов)\n");
-    }
-    
     free(entries);
-    close(container_fd);
     return 0;
 }
 
@@ -524,7 +501,7 @@ void collect_files_from_dir(const char *base_path, const char *relative_path,
     } else {
         snprintf(full_path, sizeof(full_path), "%s/%s", base_path, relative_path);
     }
-    
+
     struct stat st;
     if (lstat(full_path, &st) != 0) return;
     
@@ -560,10 +537,7 @@ file_entry_t* collect_all_files(char **paths, int path_count, int *total_files) 
     
     for (int i = 0; i < path_count; i++) {
         struct stat st;
-        if (stat(paths[i], &st) != 0) {
-            printf("Ошибка: файл/директория не существует: %s\n", paths[i]);
-            continue;
-        }
+        stat(paths[i], &st);
         
         if (S_ISDIR(st.st_mode)) {
             collect_files_from_dir(paths[i], "", &all_files, total_files);
@@ -721,7 +695,6 @@ int main(int argc, char *argv[]) {
             cleanup_secure_key();
             return 1;
         }
-        printf("Ключ установлен (длина: %zu байт)\n", master_key_len);
     } 
     else if (strcmp(operation, "-add") == 0 || strcmp(operation, "-get") == 0) {
         printf("Ошибка: для операций добавления и извлечения требуется ключ\n");
@@ -775,7 +748,7 @@ int main(int argc, char *argv[]) {
         file_entry_t *all_files = collect_all_files(&argv[start_idx], argc - start_idx, &num_files);
 
         if (num_files == 0) {
-            printf("Нет файлов для добавления\n");
+            printf("Ошибка: Нет файлов для добавления\n");
             fclose(log_file);
             cleanup_secure_key();
             return 1;
@@ -784,11 +757,9 @@ int main(int argc, char *argv[]) {
         printf("\nНайдено файлов: %d\n", num_files);
         
         if (num_files < 5) {
-            printf("\nРежим: ПОСЛЕДОВАТЕЛЬНЫЙ\n");
             fprintf(log_file, "Режим: ПОСЛЕДОВАТЕЛЬНЫЙ\n");
             run_sequential_mode(all_files, num_files, log_file);
         } else {
-            printf("\nРежим: ПАРАЛЛЕЛЬНЫЙ (%d потоков)\n", WORKERS_COUNT);
             fprintf(log_file, "Режим: ПАРАЛЛЕЛЬНЫЙ (%d потоков)\n", WORKERS_COUNT);
             run_parallel_mode(all_files, num_files, log_file);
         }

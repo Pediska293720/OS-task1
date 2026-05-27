@@ -360,8 +360,7 @@ int extract_file_from_container(const char *filename, const char *output_path) {
     uint32_t found_data_len = 0; 
     
     while ((bytes_read = read(container_fd, &header, sizeof(header))) == sizeof(header)) {
-        // Проверка на валидность заголовка
-        if (header.name_len > 4096 || header.data_len > 1024*1024*1024) {  // Максимум 1GB
+        if (header.name_len > 4096 || header.data_len > 1024*1024*1024) { 
             printf("Ошибка: некорректный заголовок файла\n");
             break;
         }
@@ -397,7 +396,6 @@ int extract_file_from_container(const char *filename, const char *output_path) {
         return -1;
     }
     
-    // Проверка на пустой файл
     if (found_data_len == 0) {
         printf("Предупреждение: файл %s пуст\n", filename);
         close(container_fd);

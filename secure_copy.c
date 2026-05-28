@@ -21,7 +21,7 @@
 static FILE *log_file = NULL;
 static volatile int keep_running = 1;
 static volatile int interruption_received = 0;
-static pthread_mutex_t container_mutex = PTHREAD_MUTEX_INITIALIZER;
+//static pthread_mutex_t container_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char* container_path = NULL;
 
@@ -37,8 +37,8 @@ typedef struct {
 } file_header_t;
 
 typedef struct {
-    char *full_path;
-    char *relative_path;
+    char *full_path; //полный путь
+    char *relative_path; //путь в образе
 } file_entry_t;
 
 typedef struct {
@@ -50,6 +50,7 @@ typedef struct {
     FILE *log_file;                
     pthread_mutex_t *log_mutex;    
     int thread_id;
+    off_t *file_offsets; 
 } thread_data_t;  
 
 void get_timestamp(char *buffer, size_t size) {
@@ -104,6 +105,7 @@ void generate_salt(uint8_t *salt, size_t size) {
     }
 }
 
+//получение нового файла для потоков
 file_entry_t* get_next_file(thread_data_t *data) {
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
@@ -131,6 +133,7 @@ file_entry_t* get_next_file(thread_data_t *data) {
     return next_file;
 }
 
+//проверка нахождения файла в контейнере
 int file_exists_in_container(const char *filename) {
     int container_fd = open(container_path, O_RDONLY);
     if (container_fd < 0) return 0;
@@ -172,7 +175,8 @@ int file_exists_in_container(const char *filename) {
     return found;
 }
 
-int append_file_to_container(const char *filename, const char *relative_name) {
+//добавление файла в контейнер
+int append_file_to_container(const char *filename, const char *relative_name, off_t offset) {
     if (file_exists_in_container(relative_name)) {
         return -2;
     }
@@ -190,8 +194,7 @@ int append_file_to_container(const char *filename, const char *relative_name) {
         }
     }
     
-    lseek(container_fd, 0, SEEK_END);
-    
+    lseek(container_fd, offset, SEEK_SET);
     int input_fd = open(filename, O_RDONLY);
     if (input_fd < 0) {
         printf("Ошибка открытия файла: %s\n", filename);
@@ -266,10 +269,10 @@ int append_file_to_container(const char *filename, const char *relative_name) {
     free(encrypted);
     close(input_fd);
     close(container_fd);
-    
     return success;
 }
 
+//вывод файлов контейнера
 int list_files_in_container(void) {
     int container_fd = open(container_path, O_RDONLY);
     if (container_fd < 0) {
@@ -345,6 +348,7 @@ int list_files_in_container(void) {
     return 0;
 }
 
+//получение файла из контейнера
 int extract_file_from_container(const char *filename, const char *output_path) {
     int container_fd = open(container_path, O_RDONLY);
     if (container_fd < 0) {
@@ -355,7 +359,7 @@ int extract_file_from_container(const char *filename, const char *output_path) {
     file_header_t header;
     ssize_t bytes_read;
     int found = 0;
-    off_t data_offset = 0;
+    off_t data_offset = 0; //начало данных найденного файла
     uint8_t found_salt[SALT_SIZE];
     uint32_t found_data_len = 0; 
     
@@ -398,8 +402,16 @@ int extract_file_from_container(const char *filename, const char *output_path) {
     
     if (found_data_len == 0) {
         printf("Предупреждение: файл %s пуст\n", filename);
+        int output_fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (output_fd >= 0) {
+            close(output_fd);
+            printf("Пустой файл извлечен: %s -> %s\n", filename, output_path);
+            log_operation(log_file, &log_mutex, 0, filename, "ИЗВЛЕЧЕН (ПУСТОЙ)");
+            close(container_fd);
+            return 0;
+        }
         close(container_fd);
-        return 0;
+        return -1;
     }
     
     lseek(container_fd, data_offset, SEEK_SET);
@@ -421,7 +433,7 @@ int extract_file_from_container(const char *filename, const char *output_path) {
         return -1;
     }
     
-    uint32_t remaining = found_data_len;
+    uint32_t remaining = found_data_len; //оставшееся количество байтов для чтения
     int success = 0;
     
     while (remaining > 0) {
@@ -456,6 +468,7 @@ int extract_file_from_container(const char *filename, const char *output_path) {
     }
 }
 
+//добавление файлов в образ отдельно каждым потоком
 void* file_processor_thread(void *arg) {
     thread_data_t *data = (thread_data_t*)arg;
     
@@ -467,13 +480,11 @@ void* file_processor_thread(void *arg) {
             pthread_mutex_unlock(data->file_mutex);
             
             if (all_processed) break;
-            usleep(100000); 
+            usleep(100000);
             continue;
         }
-        
-        pthread_mutex_lock(&container_mutex);
-        int result = append_file_to_container(input_file->full_path, input_file->relative_path);
-        pthread_mutex_unlock(&container_mutex);
+        int file_index = *data->current_file_index - 1;
+        int result = append_file_to_container(input_file->full_path, input_file->relative_path, data->file_offsets[file_index]);
         
         if (result == 0) {
             printf("  + %s\n", input_file->relative_path);
@@ -491,6 +502,7 @@ void* file_processor_thread(void *arg) {
     return NULL;
 }
 
+//обходит директории и получает все файлы
 void collect_files_from_dir(const char *base_path, const char *relative_path, 
                             file_entry_t **files, int *count) {
     char full_path[1024];
@@ -529,6 +541,7 @@ void collect_files_from_dir(const char *base_path, const char *relative_path,
     }
 }
 
+//собирает все файлы в один массив
 file_entry_t* collect_all_files(char **paths, int path_count, int *total_files) {
     file_entry_t *all_files = NULL;
     *total_files = 0;
@@ -553,13 +566,30 @@ file_entry_t* collect_all_files(char **paths, int path_count, int *total_files) 
     return all_files;
 }
 
+//считаем смещения для потоков
+off_t* calculate_offsets(file_entry_t *files, int num_files) {
+    off_t *offsets = malloc(num_files * sizeof(off_t));
+    if (!offsets) return NULL;
+    
+    off_t current = 0;
+    for (int i = 0; i < num_files; i++) {
+        offsets[i] = current;
+        
+        struct stat st;
+        stat(files[i].full_path, &st);
+        
+        current += sizeof(file_header_t); // заголовок
+        current += strlen(files[i].relative_path); // имя
+        current += st.st_size; // данные
+    }
+    return offsets;
+}
+
 void run_sequential_mode(file_entry_t  *input_files, int num_files, FILE *log_file) {
-    int success = 0, error = 0;
     for (int i = 0; i < num_files && keep_running; i++) {
-        int result = append_file_to_container(input_files[i].full_path, input_files[i].relative_path);
+        int result = append_file_to_container(input_files[i].full_path, input_files[i].relative_path, 0);
         
         if (result == 0) {
-            success++;
             printf("  + %s\n", input_files[i].relative_path);
             log_operation(log_file, &log_mutex, 0, input_files[i].relative_path, "УСПЕХ");
         } 
@@ -568,18 +598,19 @@ void run_sequential_mode(file_entry_t  *input_files, int num_files, FILE *log_fi
             log_operation(log_file, &log_mutex, 0, input_files[i].relative_path, "ОШИБКА");
         }
         else {
-            error++;
             printf("  ! ОШИБКА: %s\n", input_files[i].relative_path);
             log_operation(log_file, &log_mutex, 0, input_files[i].relative_path, "ОШИБКА");
         }
     }
-    printf("\nРезультат: %d успешно, %d ошибок\n", success, error);
 }
 
 void run_parallel_mode(file_entry_t *input_files, int num_files, FILE *log_file) {
+
     pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
     int current_file_index = 0;
     
+    off_t *offsets = calculate_offsets(input_files, num_files);
+
     pthread_t workers[WORKERS_COUNT];
     thread_data_t thread_data[WORKERS_COUNT];
     
@@ -592,6 +623,7 @@ void run_parallel_mode(file_entry_t *input_files, int num_files, FILE *log_file)
         thread_data[i].log_file = log_file;
         thread_data[i].log_mutex = &log_mutex;
         thread_data[i].thread_id = i + 1;
+        thread_data[i].file_offsets = offsets;
         
         if (pthread_create(&workers[i], NULL, file_processor_thread, &thread_data[i]) != 0) {
             printf("Ошибка создания потока %d\n", i + 1);
@@ -603,18 +635,23 @@ void run_parallel_mode(file_entry_t *input_files, int num_files, FILE *log_file)
         pthread_join(workers[i], NULL);
     }
     pthread_mutex_destroy(&file_mutex);
+    free(offsets);
 }
 
 void signal_handler(int sig) {
+    (void)sig;
     printf("\nПолучен сигнал SIGINT. Завершение работы...\n");
-
-     if (log_file) {
+    keep_running = 0;
+    
+    if (log_file) {
         char timestamp[64];
         get_timestamp(timestamp, sizeof(timestamp));
         fprintf(log_file, "[%s] SIGINT: Прерывание по клавиатуре\n", timestamp);
         fflush(log_file);
     }
-    _exit(sig);
+    sleep(1);
+    
+    _exit(sig); 
 }
 
 void segfault_handler(int sig) {
@@ -667,10 +704,8 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(operation, "-get") == 0) {
         for (int i = 2; i < argc; i++) {
-            if (argv[i][0] != '-' && 
-                strcmp(argv[i], container_path) != 0 &&
-                master_key && strcmp(argv[i], master_key) != 0 &&
-                output_file && strcmp(argv[i], output_file) != 0) {
+            if (argv[i][0] != '-' && strcmp(argv[i], container_path) != 0 && master_key && strcmp(argv[i], master_key) != 0 
+                && output_file && strcmp(argv[i], output_file) != 0) {
                 file_to_get = argv[i];
                 break;
             }

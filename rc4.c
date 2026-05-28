@@ -21,6 +21,7 @@ typedef struct {
     uint8_t j;
 } rc4_state_t;
 
+//Key Scheduling Algorithm - перемешиваем S-блок для дальнецшего шифрования
 static void rc4_ksa(const uint8_t *key, size_t keylen, rc4_state_t *state) {
     for (int i = 0; i < SBOX_SIZE; i++) {
         state->s[i] = i;
@@ -36,8 +37,9 @@ static void rc4_ksa(const uint8_t *key, size_t keylen, rc4_state_t *state) {
     
     state->i = 0;
     state->j = 0;
+    //инициализируем счетчики для PRGA нулями
 }
-
+//Pseudo-Random Generation Algorithm - возвращает "случайный" байт S-блока, при каждом запуске разный
 static uint8_t rc4_prga_byte(rc4_state_t *state) {
     state->i++;
     state->j += state->s[state->i];
@@ -46,7 +48,7 @@ static uint8_t rc4_prga_byte(rc4_state_t *state) {
     state->s[state->i] = state->s[state->j];
     state->s[state->j] = temp;
     
-    return state->s[(state->s[state->i] + state->s[state->j]) & 0xFF];
+    return state->s[(state->s[state->i] + state->s[state->j]) & 0xFF]; //обрезаем до одного байта 0xFF
 }
 
 static int get_master_key(uint8_t* buffer, size_t* len) {

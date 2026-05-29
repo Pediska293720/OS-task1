@@ -15,40 +15,92 @@ static size_t page_size = 0;
 
 static pthread_mutex_t encryption_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static uint8_t* secure_sbox = NULL;
+static size_t sbox_page_size = 0;
+static pthread_mutex_t sbox_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 typedef struct {
     uint8_t s[SBOX_SIZE];
     uint8_t i;
     uint8_t j;
 } rc4_state_t;
 
-//Key Scheduling Algorithm - перемешиваем S-блок для дальнецшего шифрования
-static void rc4_ksa(const uint8_t *key, size_t keylen, rc4_state_t *state) {
+static void rc4_ksa_secure(const uint8_t *key, size_t keylen) {
+    pthread_mutex_lock(&sbox_mutex);
+    
+    if (mprotect(secure_sbox, sbox_page_size, PROT_WRITE) == -1) {
+        pthread_mutex_unlock(&sbox_mutex);
+        return;
+    }
+    
     for (int i = 0; i < SBOX_SIZE; i++) {
-        state->s[i] = i;
+        secure_sbox[i] = i;
     }
     
     uint8_t j = 0;
     for (int i = 0; i < SBOX_SIZE; i++) {
-        j = j + state->s[i] + key[i % keylen];
-        uint8_t temp = state->s[i];
-        state->s[i] = state->s[j];
-        state->s[j] = temp;
+        j = j + secure_sbox[i] + key[i % keylen];
+        uint8_t temp = secure_sbox[i];
+        secure_sbox[i] = secure_sbox[j];
+        secure_sbox[j] = temp;
     }
     
-    state->i = 0;
-    state->j = 0;
-    //инициализируем счетчики для PRGA нулями
+    mprotect(secure_sbox, sbox_page_size, PROT_NONE);
+    pthread_mutex_unlock(&sbox_mutex);
 }
-//Pseudo-Random Generation Algorithm - возвращает "случайный" байт S-блока, при каждом запуске разный
-static uint8_t rc4_prga_byte(rc4_state_t *state) {
-    state->i++;
-    state->j += state->s[state->i];
+
+static uint8_t rc4_prga_byte_secure(uint8_t *i_ptr, uint8_t *j_ptr) {
+    pthread_mutex_lock(&sbox_mutex);
     
-    uint8_t temp = state->s[state->i];
-    state->s[state->i] = state->s[state->j];
-    state->s[state->j] = temp;
+    if (mprotect(secure_sbox, sbox_page_size, PROT_READ | PROT_WRITE) == -1) {
+        pthread_mutex_unlock(&sbox_mutex);
+        return 0;
+    }
     
-    return state->s[(state->s[state->i] + state->s[state->j]) & 0xFF]; //обрезаем до одного байта 0xFF
+    uint8_t i = *i_ptr;
+    uint8_t j = *j_ptr;
+    
+    i++;
+    j += secure_sbox[i];
+    
+    uint8_t temp = secure_sbox[i];
+    secure_sbox[i] = secure_sbox[j];
+    secure_sbox[j] = temp;
+    
+    uint8_t result = secure_sbox[(secure_sbox[i] + secure_sbox[j]) & 0xFF];
+    
+    *i_ptr = i;
+    *j_ptr = j;
+    
+    mprotect(secure_sbox, sbox_page_size, PROT_NONE);
+    pthread_mutex_unlock(&sbox_mutex);
+    
+    return result;
+}
+
+static int init_secure_sbox(void) {
+    sbox_page_size = sysconf(_SC_PAGESIZE);
+    if (sbox_page_size == 0) sbox_page_size = 4096;
+    
+    secure_sbox = mmap(NULL, sbox_page_size, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    
+    if (secure_sbox == MAP_FAILED) {
+        secure_sbox = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+static void cleanup_secure_sbox(void) {
+    if (secure_sbox == NULL) return;
+    
+    pthread_mutex_lock(&sbox_mutex);
+    mprotect(secure_sbox, sbox_page_size, PROT_READ | PROT_WRITE);
+    memset(secure_sbox, 0, sbox_page_size);
+    munmap(secure_sbox, sbox_page_size);
+    secure_sbox = NULL;
+    pthread_mutex_unlock(&sbox_mutex);
 }
 
 static int get_master_key(uint8_t* buffer, size_t* len) {
@@ -112,19 +164,26 @@ void rc4_crypt_with_salt(void* src, void* dst, int len, const uint8_t* salt, siz
     memcpy(full_key + stored_key_len, salt, salt_len);
     memset(stored_key, 0, sizeof(stored_key));
     
-    rc4_state_t state;
-    rc4_ksa(full_key, full_key_len, &state);
+    rc4_ksa_secure(full_key, full_key_len);
+    
+    uint8_t i = 0, j = 0;
     
     uint8_t* src_bytes = (uint8_t*)src;
     uint8_t* dst_bytes = (uint8_t*)dst;
     
-    for (int i = 0; i < len; i++) {
-        dst_bytes[i] = src_bytes[i] ^ rc4_prga_byte(&state);
+    for (int pos = 0; pos < len; pos++) {
+        dst_bytes[pos] = src_bytes[pos] ^ rc4_prga_byte_secure(&i, &j);
     }
     
-    memset(&state, 0, sizeof(rc4_state_t));
     memset(full_key, 0, full_key_len);
     free(full_key);
+    
+    pthread_mutex_lock(&sbox_mutex);
+    if (mprotect(secure_sbox, sbox_page_size, PROT_WRITE) == 0) {
+        memset(secure_sbox, 0, SBOX_SIZE);
+        mprotect(secure_sbox, sbox_page_size, PROT_NONE);
+    }
+    pthread_mutex_unlock(&sbox_mutex);
     
     pthread_mutex_unlock(&encryption_mutex);
 }
@@ -137,6 +196,12 @@ int init_secure_key_storage(void) {
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     
     if (secure_master_key == MAP_FAILED) {
+        secure_master_key = NULL;
+        return -1;
+    }
+    
+    if (init_secure_sbox() != 0) {
+        munmap(secure_master_key, page_size);
         secure_master_key = NULL;
         return -1;
     }
@@ -159,4 +224,6 @@ void cleanup_secure_key(void) {
     
     munmap(secure_master_key, page_size);
     secure_master_key = NULL;
+    
+    cleanup_secure_sbox();
 }
